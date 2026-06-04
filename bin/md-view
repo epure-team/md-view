@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(dirname -- "$SCRIPT_DIR")"
+
+APP_HOME="${MD_VIEW_HOME:-$REPO_ROOT}"
+SERVER="$REPO_ROOT/src/md_view/server.py"
+VENV="${MD_VIEW_VENV:-$REPO_ROOT/.venv}"
+PYTHON_BIN="${MD_VIEW_PYTHON:-python3}"
+REQUIREMENTS="$REPO_ROOT/requirements.txt"
+
+usage() {
+  cat <<'EOF'
+md-view - local offline Markdown visualizer
+
+Usage:
+  md-view <markdown-file> [<markdown-file> ...] [--port PORT] [--browser firefox|none]
+  md-view --help
+
+What it does:
+  Starts one localhost-only Python server and opens the Markdown file(s) in a
+  browser view. The page live-updates when the selected file changes on disk.
+
+Features:
+  - Basic Markdown rendering, tables, and fenced code blocks
+  - Server-side syntax highlighting via Pygments
+  - Mermaid fenced blocks rendered by local/offline JavaScript
+  - LaTeX math rendered server-side to MathML for Firefox
+
+Runtime layout:
+  Server:  <repo>/src/md_view/server.py
+  Assets:  <repo>/assets/
+  Venv:    <repo>/.venv by default, or MD_VIEW_VENV when set
+
+Options:
+  --port PORT              Local port to bind. Default: 8765, with automatic
+                           fallback to nearby free ports when the default is busy.
+  --browser firefox|none   Browser launcher. Default: firefox. Use "none" to
+                           only print the URL.
+
+Environment:
+  MD_VIEW_HOME             Override the app home containing assets/.
+  MD_VIEW_VENV             Override the Python venv path used by the launcher.
+  MD_VIEW_PYTHON           Override python3 used to create the contained venv.
+EOF
+}
+
+if [[ $# -eq 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
+case "${1:-}" in
+  -h|--help|help)
+    usage
+    exit 0
+    ;;
+esac
+
+if [[ ! -r "$SERVER" ]]; then
+  printf 'md-view: server not found at %s\n' "$SERVER" >&2
+  exit 1
+fi
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  printf 'md-view: Python 3.9 or newer is required but %s was not found\n' "$PYTHON_BIN" >&2
+  exit 1
+fi
+
+# Require Python >= 3.9
+PY_VERSION=$("$PYTHON_BIN" -c 'import sys; print("%d%02d" % sys.version_info[:2])' 2>/dev/null || echo "000")
+if [[ "$PY_VERSION" -lt 309 ]]; then
+  printf 'md-view: Python 3.9 or newer is required (found %s)\n' \
+    "$("$PYTHON_BIN" --version 2>&1 || echo unknown)" >&2
+  exit 1
+fi
+
+mkdir -p "$APP_HOME" "$APP_HOME/assets/vendor"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  printf 'md-view: creating contained Python venv at %s\n' "$VENV" >&2
+  "$PYTHON_BIN" -m venv "$VENV"
+fi
+
+if ! "$VENV/bin/python" - <<'PY' >/dev/null 2>&1
+import importlib.util
+missing = [name for name in ("markdown", "pygments", "latex2mathml")
+           if importlib.util.find_spec(name) is None]
+raise SystemExit(1 if missing else 0)
+PY
+then
+  printf 'md-view: installing Python dependencies into contained venv\n' >&2
+  "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || true
+  if [[ -r "$REQUIREMENTS" ]]; then
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+      "$VENV/bin/python" -m pip install --upgrade -r "$REQUIREMENTS"
+  else
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+      "$VENV/bin/python" -m pip install --upgrade \
+        markdown Pygments latex2mathml
+  fi
+fi
+
+export MD_VIEW_HOME="$APP_HOME"
+export PYTHONUNBUFFERED=1
+exec "$VENV/bin/python" "$SERVER" "$@"
