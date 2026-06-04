@@ -31,8 +31,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import markdown as markdown_lib
+import xml.etree.ElementTree as etree
 from latex2mathml.converter import convert as latex_to_mathml
 from markdown.extensions import Extension
+from markdown.inlinepatterns import InlineProcessor
 from markdown.preprocessors import Preprocessor
 from pygments.formatters import HtmlFormatter
 
@@ -376,6 +378,32 @@ class MathPreprocessor(Preprocessor):
         return out
 
 
+# Match bare http/https URLs in text nodes.
+# - Requires http:// or https:// prefix.
+# - Allows parentheses in URL paths (common in Wikipedia links) as balanced pairs.
+# - Strips trailing punctuation that is unlikely to be part of the URL.
+_BARE_URL_RE = (
+    r"(https?://"
+    r"(?:[^\s<>\[\]()\"\']|\((?:[^\s<>\[\]()\"\'])*\))+"
+    r"(?<![.,;:!?'\"]))"
+)
+
+
+class UrlAutolinkProcessor(InlineProcessor):
+    """Convert bare http/https URLs in Markdown text to clickable <a> elements."""
+
+    def handleMatch(  # noqa: N802 - markdown API name
+        self, m: re.Match[str], data: str
+    ) -> tuple[etree.Element, int, int]:
+        url = m.group(1)
+        el = etree.Element("a")
+        el.set("href", url)
+        el.set("target", "_blank")
+        el.set("rel", "noopener noreferrer")
+        el.text = url
+        return el, m.start(0), m.end(0)
+
+
 class MdViewExtension(Extension):
     def extendMarkdown(self, md: markdown_lib.Markdown) -> None:  # noqa: N802 - markdown API name
         # Run after Markdown's normalize_whitespace preprocessor (priority 30)
@@ -383,6 +411,14 @@ class MdViewExtension(Extension):
         # the remaining non-Mermaid code fences.
         md.preprocessors.register(MermaidPreprocessor(md), "md_view_mermaid", 29)
         md.preprocessors.register(MathPreprocessor(md), "md_view_math", 28)
+        # Autolink bare http/https URLs in plain text.  Priority 170 runs before
+        # the default backtick (170) and emphasis (60) processors, ensuring bare
+        # URLs are linked before other inline rules consume the text.  The
+        # InlineProcessor only operates on text nodes, so URLs already inside
+        # <a href="..."> are never double-linked.
+        md.inlinePatterns.register(
+            UrlAutolinkProcessor(_BARE_URL_RE, md), "md_view_url_autolink", 170
+        )
 
 
 def mathml_for(tex: str, *, display: bool) -> str:
